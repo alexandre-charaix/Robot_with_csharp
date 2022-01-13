@@ -1,0 +1,295 @@
+using ExtendedSerialPort;
+using System;
+using System.Collections.Generic;
+using System.IO.Ports;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Timers;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Data;
+using System.Windows.Documents;
+using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+using System.Windows.Navigation;
+using System.Windows.Shapes;
+using System.Windows.Threading;
+
+namespace Robot_Interface_Titi_Cloclo
+{
+    /// <summary>
+    /// Logique d'interaction pour MainWindow.xaml
+    /// </summary>
+    
+    public partial class MainWindow : Window
+    {
+        ReliableSerialPort SerialPort1;
+        DispatcherTimer timerAffichage;
+        Robot robot = new Robot();
+        Queue<byte> byteListReceived = new Queue<byte>();
+
+        public MainWindow()
+        {
+            InitializeComponent();
+            SerialPort1 = new ReliableSerialPort("COM18", 115200, Parity.None, 8, StopBits.One);
+            SerialPort1.DataReceived += SerialPort1_DataReceived;
+            SerialPort1.Open();
+            timerAffichage = new DispatcherTimer();
+            timerAffichage.Interval = new TimeSpan(0, 0, 0, 0, 100);
+            timerAffichage.Tick += TimerAffichage_Tick;
+            timerAffichage.Start();
+
+
+        }
+
+        private void TimerAffichage_Tick(object sender, EventArgs e)
+        {
+            if (byteListReceived.Count != 0)
+            {
+               
+                //textBoxReception.Text += "Reçu : ";
+                while(byteListReceived.Count != 0)
+                {
+                    DecodeMessage(byteListReceived.Dequeue());
+                //    textBoxReception.Text += " 0x"+byteListReceived.Dequeue().ToString("X2");//string() ->Renvois les numéros en Decimal  // String("X") ->Renvois les numéros en HexaDecimal // String("X2") ->Renvois les numéros en HexaDecimal avec 2 chiffres minimum // String("X4") ->Renvois les numéros en HexaDecimal avec 4 chiffres minimum
+                }
+                //textBoxReception.Text += "\n";
+
+            }
+         //   throw new NotImplementedException();
+        }
+
+        public void SerialPort1_DataReceived(object sender, DataReceivedArgs e)
+        {
+            foreach(var b in e.Data)
+            {
+                byteListReceived.Enqueue(b);
+            }
+        }
+
+        private byte CalculateCheckSum(int msgFunction, int msgPayloadLength, byte[] msgPlayload)
+        {
+            byte sum = 0;
+            unchecked
+            {
+                foreach(byte b in msgPlayload)
+                {
+                    sum ^= b;
+                }
+            }
+            sum ^= (byte)msgPayloadLength;
+            sum ^= (byte)msgFunction;
+            sum ^= 0xFE;
+            return sum;
+        }
+
+        void UartEncodeAndSendMessage(int msgFunction, int msgPayloadLength, byte[] msgPlayload)
+        {
+            byte[] Trame = new byte[msgPayloadLength + 6];
+            Trame[0] = 0xFE;
+            Trame[1] = (byte)(msgFunction << 8);
+            Trame[2] = (byte)msgFunction;
+            Trame[3] = (byte)(msgPayloadLength<<8);
+            Trame[4] = (byte)msgPayloadLength;
+            
+            int i = 5;
+            foreach(byte b in msgPlayload)
+            {
+                Trame[i] = b;
+                i++;
+            }
+            Trame[i] = CalculateCheckSum(msgFunction, msgPayloadLength, msgPlayload);
+            SerialPort1.Write(Trame, 0, (msgPayloadLength + 6));
+        }
+
+        public enum StateReception{
+            Waiting,
+            FunctionMSB,
+            FunctionLSB,
+            PayloadLengthMSB,
+            PayloadLengthLSB,
+            Payload,
+            CheckSum
+        }
+
+        StateReception rcvState = StateReception.Waiting;
+        int msgDecodedFunction = 0;
+        int msgDecodedPayloadLength = 0;
+        byte[] msgDecodedPayload;
+        int msgDecodedPayloadIndex = 0;
+
+        private void DecodeMessage(byte c)
+        {
+            switch (rcvState)
+            {
+                case StateReception.Waiting:
+                    if(c == 0xFE)
+                    {
+                        rcvState = StateReception.FunctionMSB;
+                    }
+                break;
+                case StateReception.FunctionMSB:
+                    msgDecodedFunction = c << 8 ;
+                    rcvState = StateReception.FunctionLSB;
+                break;
+                case StateReception.FunctionLSB:
+                    msgDecodedFunction += c;
+                    rcvState = StateReception.PayloadLengthMSB;
+                    break;
+                case StateReception.PayloadLengthMSB:
+                    msgDecodedPayloadLength = c << 8;
+                    rcvState = StateReception.PayloadLengthLSB;
+                    break;
+                case StateReception.PayloadLengthLSB:
+                    msgDecodedPayloadLength += c;
+
+                    if(msgDecodedPayloadLength == 0)
+                    {
+                        rcvState = StateReception.CheckSum;
+                    }
+                    else if(msgDecodedPayloadLength>1024)
+                    {
+                        rcvState = StateReception.Waiting;
+                    }
+                    else
+                    {
+                        msgDecodedPayload = new byte[msgDecodedPayloadLength];
+                        msgDecodedPayloadIndex = 0;
+                        rcvState = StateReception.Payload;
+                    }
+                    break;
+                case StateReception.Payload:
+                    msgDecodedPayload[msgDecodedPayloadIndex] = c;
+                    msgDecodedPayloadIndex++;
+                    if (msgDecodedPayloadIndex == msgDecodedPayloadLength)
+                    {
+                        rcvState = StateReception.CheckSum;
+                    }
+                break;
+                case StateReception.CheckSum:
+                    if (CalculateCheckSum(msgDecodedFunction,msgDecodedPayloadLength,msgDecodedPayload) == c){
+                        //Success, on a un message valide
+                        textBoxReception.Text += "Le message reçu est bien décodé \n";
+                        ProcessDecodedMessage(msgDecodedFunction, msgDecodedPayloadLength, msgDecodedPayload);
+                    }
+                    else
+                    {
+                        textBoxReception.Text += "Message failed \n";
+                    }
+                    rcvState = StateReception.Waiting;
+                    break;
+                default:
+                    rcvState = StateReception.Waiting;
+                break;
+            }
+        }
+
+        void ProcessDecodedMessage(int MsgFunction, int msgPlayloadLength, byte[] msgPlayload)
+        {
+            if(MsgFunction == 0x80)
+            {
+                foreach(byte b in msgPlayload)
+                {
+                    textBoxReception.Text += " 0x"+b.ToString("X2");
+                }
+                textBoxReception.Text += "\n";
+            }
+            if (MsgFunction == 0x0020)
+            {
+                if (msgPlayload[0] == 0X00)
+                {
+                    if (msgPlayload[1] == 0x00)
+                    {
+                        checkBoxLed1.IsChecked = false;
+                    }
+                    else
+                    {
+                        checkBoxLed1.IsChecked = true;
+                    }
+                }
+                if (msgPlayload[0] == 0X01)
+                {
+                    if (msgPlayload[1] == 0x00)
+                    {
+                        checkBoxLed2.IsChecked = false;
+                    }
+                    else
+                    {
+                        checkBoxLed2.IsChecked = true;
+                    }
+                }
+                if (msgPlayload[0] == 0X02)
+                {
+                    if (msgPlayload[1] == 0x00)
+                    {
+                        checkBoxLed3.IsChecked = false;
+                    }
+                    else
+                    {
+                        checkBoxLed3.IsChecked = true;
+                    }
+                }
+            }
+            if (MsgFunction == 0x30)
+            {
+                TELG.Content = "IR Gauche: " + (int)msgPlayload[0]+" cm";
+                TELC.Content = "IR Centre: " + (int)msgPlayload[1] + " cm";
+                TELD.Content = "IR Droit: " + (int)msgPlayload[2] + " cm";
+            }
+            if (MsgFunction == 0x40)
+            {
+                VITG.Content = "Vitesse Gauche: " + (int)msgPlayload[0] + " %";
+                VITD.Content = "Vitesse Droite: " + (int)msgPlayload[1] + " %";
+            }
+        }
+
+        void SendMessage()
+        {
+            //string Text = "Reçu : " + textBoxEmission.Text + "\n";
+            SerialPort1.WriteLine(textBoxEmission.Text);
+            //textBoxReception.Text += Text;
+            textBoxEmission.Clear();
+        }
+        private void buttonEnvoyer_Click(object sender, RoutedEventArgs e)
+        {
+            SendMessage();
+
+            if (buttonEnvoyer.Background == Brushes.LightPink)
+            {
+                buttonEnvoyer.Background = Brushes.LightBlue;
+            }
+            else
+            {
+                buttonEnvoyer.Background = Brushes.LightPink;
+            }
+            
+        }
+
+        private void textBoxEmission_KeyUp(object sender, KeyEventArgs e)
+        {
+            if(e.Key == Key.Enter)
+            {
+                SendMessage();
+            }
+        }
+
+        private void buttonClear_Click(object sender, RoutedEventArgs e)
+        {
+            textBoxReception.Clear();
+        }
+
+        private void buttonTest_Click(object sender, RoutedEventArgs e)
+        {
+            byte[] array = Encoding.ASCII.GetBytes("Bonjour");
+            UartEncodeAndSendMessage(0x0080, array.Length, array);
+            byte[] LED_Modif = { 0x02, 0x01 };
+            UartEncodeAndSendMessage(0x0020, 2, LED_Modif);
+            byte[] DistTELEMETRE = { 0x31, 0x24, 0x0F };
+            UartEncodeAndSendMessage(0x0030, 3, DistTELEMETRE);
+            byte[] Vitesse = { 0x32, 0x32 };
+            UartEncodeAndSendMessage(0x0040, 2, Vitesse);
+        }
+    }
+}
